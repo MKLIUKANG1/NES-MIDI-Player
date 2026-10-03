@@ -1,0 +1,41 @@
+# ==== Сборка ====
+*.o
+*.obj
+*.res.o
+app.res.o
+nes_midi_player*.exe
+*.exe
+*.dll
+*.a
+*.lib
+
+# ==== Временные файлы ====
+*.swp
+*~
+*.bak
+*.tmp
+
+# ==== IDE ====
+.vscode/
+.idea/
+*.cbp
+*.code-workspace
+
+# ==== Windows ====
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ==== MSYS2/MinGW ====
+# ничего специфичного
+
+# ==== Пользовательские данные ====
+# (оставляем пустыми — пресеты и DPCM могут быть в репо)
+# Presets/language.txt
+# DPCM Samples/*.dmc
+
+# ==== Экспорт ====
+*.wav
+
+# ==== Логи ====
+*.log
