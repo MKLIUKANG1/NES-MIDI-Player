@@ -89,14 +89,9 @@
 ---
 
 ## 📸 Скриншоты
+<img width="1239" height="932" alt="NES MIDI Player" src="https://github.com/user-attachments/assets/34087928-b8ce-4a87-9578-d1b9595e6e59" />
+<img width="1239" height="932" alt="NES MIDI Player - Instrument Editor" src="https://github.com/user-attachments/assets/08a1f4ce-65ff-4cd3-8298-1beec9dabd21" />
 
-> Добавьте сюда свои скриншоты: перетащите PNG прямо в редактор GitHub — он сам сгенерирует ссылки.
-https://docs/screenshot-main.png
-https://docs/screenshot-editor.png
-https://docs/screenshot-envelope.png
-https://docs/screenshot-pianoroll.png
-
-text
 
 ---
 
