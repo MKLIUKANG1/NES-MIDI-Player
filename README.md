@@ -135,6 +135,8 @@ cp /mingw64/bin/SDL2.dll .
 Запуск
 bash
 ./nes_midi_player_v1.0.exe your_file.mid
+```
+
 Быстрый старт
 Запустите nes_midi_player_v1.0.1.exe
 
