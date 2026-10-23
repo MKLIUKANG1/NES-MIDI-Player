@@ -3,11 +3,12 @@ WINDRES  = windres
 SDL2_INC := $(shell cygpath -m /mingw64/include/SDL2)
 SDL2_LIB := $(shell cygpath -m /mingw64/lib)
 
-CXXFLAGS = -std=c++17 -O2 -Wall -Iinclude -I$(SDL2_INC)
+CXXFLAGS = -std=c++17 -O2 -Wall -Wno-array-bounds -Wno-stringop-overflow -Iinclude -I$(SDL2_INC)
 LDFLAGS  = -L$(SDL2_LIB)
 LIBS     = -lmingw32 -lSDL2main -lSDL2 -lopengl32 -lgdi32 -lcomdlg32
 
 SRC = src/main.cpp \
+      src/instrument_editor.cpp \
       src/midi_reader.cpp \
       src/apu.cpp \
       src/dmc.cpp \
@@ -25,7 +26,7 @@ SRC = src/main.cpp \
 
 OBJ = $(SRC:.cpp=.o)
 RES = app.res.o
-BIN = nes_midi_player_v1.0.exe
+BIN = nes_midi_player_v1.0.1.exe
 
 all: $(BIN)
 

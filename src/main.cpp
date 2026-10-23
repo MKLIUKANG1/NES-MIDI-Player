@@ -26,6 +26,7 @@
 #include "version.h"
 #include "i18n.h"
 #include "env_editor.h"
+#include "instrument_editor.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
 #include "imgui.h"
@@ -86,6 +87,110 @@ static void play_dmc_preview(const DmcSample& smp, int rate_index, int volume) {
     SDL_ClearQueuedAudio(g_preview_dev);
     SDL_QueueAudio(g_preview_dev, buf.data(),
                    (Uint32)(total_samples * 2 * sizeof(int16_t)));
+}
+
+// ===== Preview для Noise-барабана =====
+void play_drum_preview(const ChipSettings& s, int slot) {
+    if (!g_preview_dev || slot < 0 || slot >= DRUM_COUNT) return;
+
+    const int total = (int)(g_preview_sr * 0.5);
+    std::vector<int16_t> buf(total * 2);
+
+    int mode = s.drum_noise_mode_slot[slot].load();
+    int base_rate = s.drum_noise_rate_index_slot[slot].load();
+    if (base_rate < 0) base_rate = 0;
+    if (base_rate > 15) base_rate = 15;
+
+    EnvParams env;
+    env.attack  = s.drum_noise_attack_slot[slot].load();
+    env.decay   = s.drum_noise_decay_slot[slot].load();
+    env.sustain = s.drum_noise_sustain_slot[slot].load();
+    env.release = s.drum_noise_release_slot[slot].load();
+
+    // Fallback: D=0 и S=0 -> тишина, ставим короткий удар
+    if (env.attack < 0.001f) env.attack = 0.001f;
+    if (env.decay < 0.01f && env.sustain < 0.01f) env.decay = 0.08f;
+    if (env.release < 0.01f) env.release = 0.05f;
+
+    const EnvelopeCurve& dvol  = s.drum_vol_env[slot];
+    const EnvelopeCurve& drate = s.drum_rate_env[slot];
+
+    int level = 64;
+    uint16_t lfsr = 0x7FFF;
+    double phase = 0.0;
+
+    auto env_val = [](double t, double dur, const EnvParams& e){
+        if (t < 0) return 0.0;
+        double A = e.attack > 1e-6 ? e.attack : 1e-6;
+        double D = e.decay  > 1e-6 ? e.decay  : 1e-6;
+        double R = e.release> 1e-6 ? e.release: 1e-6;
+        double S = std::max(0.0, std::min(1.0, (double)e.sustain));
+        if (t < A) return t / A;
+        if (t < A + D) return 1.0 - (1.0 - S) * ((t - A) / D);
+        if (t < dur) return S;
+        double rt = t - dur;
+        if (rt < R) return S * (1.0 - rt / R);
+        return 0.0;
+    };
+    auto env_step_fn = [](const EnvelopeCurve& e, double t){
+        int sp = e.speed.load(); if (sp < 1) sp = 1;
+        int len = e.length.load();
+        if (len < 1) len = 1;
+        if (len > EnvelopeCurve::MAX_STEPS) len = EnvelopeCurve::MAX_STEPS;
+        int step = (int)(t * 60.0 / sp);
+        if (step < 0) step = 0;
+        int ls = e.loop_start.load(), le = e.loop_end.load();
+        if (ls >= 0 && le > ls && step > le) {
+            int lp = le - ls + 1;
+            step = ls + (step - ls) % lp;
+        } else if (step >= len) step = len - 1;
+        if (step < 0) step = 0;
+        if (step >= EnvelopeCurve::MAX_STEPS) step = EnvelopeCurve::MAX_STEPS - 1;
+        return step;
+    };
+
+    const double dur = 0.5;
+    for (int i = 0; i < total; ++i) {
+        double tl = (double)i / g_preview_sr;
+
+        int idx = base_rate;
+        if (drate.enabled.load()) {
+            int st = env_step_fn(drate, tl);
+            idx += drate.values[st].load();
+        }
+        if (idx < 0) idx = 0;
+        if (idx > 15) idx = 15;
+        double rate_hz = NES_NOISE_RATE[idx];
+
+        double a = env_val(tl, dur, env);
+        int vol_mult = 15;
+        if (dvol.enabled.load()) {
+            int st = env_step_fn(dvol, tl);
+            vol_mult = dvol.values[st].load();
+        }
+        int vol = (int)std::lround(15 * a * vol_mult / 15.0);
+        if (vol < 0) vol = 0;
+        if (vol > 15) vol = 15;
+
+        float sample = 0.0f;
+        if (vol > 0) {
+            phase += rate_hz / g_preview_sr;
+            while (phase >= 1.0) {
+                phase -= 1.0;
+                uint16_t bit;
+                if (mode) bit = (lfsr ^ (lfsr >> 6)) & 1;
+                else      bit = (lfsr ^ (lfsr >> 1)) & 1;
+                lfsr = (lfsr >> 1) | (bit << 14);
+            }
+            sample = (lfsr & 1) ? (vol / 15.0f) : -(vol / 15.0f);
+        }
+        int16_t sv = (int16_t)(sample * 26000.0f);
+        buf[2*i] = sv;
+        buf[2*i+1] = sv;
+    }
+
+    SDL_ClearQueuedAudio(g_preview_dev);
+    SDL_QueueAudio(g_preview_dev, buf.data(), (Uint32)(total * 2 * sizeof(int16_t)));
 }
 
 // ---------- Нативные диалоги ----------
@@ -818,300 +923,13 @@ int main(int argc, char** argv) {
                 ImGui::End();
             }
 
-            // ===== Редактор инструментов =====
+            // ===== Редактор инструментов (FamiStudio-style) =====
+            static int g_inst_edit_idx = 0;
             if (show_editor) {
-                ImGui::SetNextWindowSize(ImVec2(1150, 720), ImGuiCond_FirstUseEver);
-                if (ImGui::Begin(TR("Instrument Editor"), &show_editor)) {
-                    if (ImGui::Button(TR("Reset All"))) player->settings().reset_all();
-                    ImGui::SameLine();
-                    if (ImGui::Button(TR("Save Preset..."))) {
-                        std::wstring p;
-                        if (dlg_save(win, p,
-                            L"NES Preset (*.nespreset)\0*.nespreset\0All Files (*.*)\0*.*\0",
-                            L"Сохранить пресет", L"nespreset"))
-                            save_preset(p, player->settings());
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button(TR("Load Preset..."))) {
-                        std::wstring p;
-                        if (dlg_open(win, p,
-                            L"NES Preset (*.nespreset)\0*.nespreset\0All Files (*.*)\0*.*\0",
-                            L"Загрузить пресет"))
-                            if (load_preset(p, player->settings())) player->remap();
-                    }
-                    ImGui::SameLine();
-                    static char filter[64] = "";
-                    ImGui::SetNextItemWidth(200);
-                    ImGui::InputTextWithHint("##filter", TR("filter..."), filter, sizeof(filter));
-
-                    static const char* chans[]  = {TR("Pulse"), TR("Triangle"), TR("Noise")};
-                    static const char* duties[] = {"12.5%","25%","50%","75%"};
-                    static const char* sweeps[] = {TR("off"),TR("up-down"),TR("cycle"),TR("alt")};
-                    static const char* noises[] = {TR("long LFSR"), TR("short LFSR")};
-
-                    bool need_remap = false;
-
-                    // ====== DMC — Drum Slots ======
-                    if (ImGui::CollapsingHeader(TR("DMC - Drum Slots (DPCM)"),
-                                                ImGuiTreeNodeFlags_DefaultOpen))
-                    {
-                        if (dmc_samples.empty()) {
-                            ImGui::TextColored(ImVec4(1,0.6f,0.2f,1),
-                                TR("No .dmc samples in 'DPCM Samples'. Put files and File -> Refresh DPCM Samples."));
-                        } else {
-                            // Имена для combo
-                            std::vector<const char*> cnames;
-                            cnames.reserve(dmc_samples.size() + 1);
-                            cnames.push_back("(none)");
-                            for (auto& smp : dmc_samples) cnames.push_back(smp.name.c_str());
-
-                            if (ImGui::BeginTable("drum_table", 6,
-                                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                ImGuiTableFlags_SizingFixedFit))
-                            {
-                                ImGui::TableSetupColumn("Слот",  ImGuiTableColumnFlags_WidthFixed, 100);
-                                ImGui::TableSetupColumn("Sample",ImGuiTableColumnFlags_WidthFixed, 220);
-                                ImGui::TableSetupColumn("Rate",  ImGuiTableColumnFlags_WidthFixed, 180);
-                                ImGui::TableSetupColumn("Vol",   ImGuiTableColumnFlags_WidthFixed, 160);
-                                ImGui::TableSetupColumn("Loop",  ImGuiTableColumnFlags_WidthFixed, 60);
-                                ImGui::TableSetupColumn("Test",  ImGuiTableColumnFlags_WidthFixed, 70);
-                                ImGui::TableHeadersRow();
-
-                                for (int i = 0; i < DRUM_COUNT; ++i) {
-                                    ImGui::TableNextRow();
-                                    ImGui::PushID(1000 + i);
-
-                                    ImGui::TableSetColumnIndex(0);
-                                    ImGui::AlignTextToFramePadding();
-                                    ImGui::TextUnformatted(tr_drum_slot(i));
-
-                                    ImGui::TableSetColumnIndex(1);
-                                    ImGui::SetNextItemWidth(-1);
-                                    int cur = s.drum_sample[i].load() + 1;
-                                    if (cur < 0) cur = 0;
-                                    if (cur >= (int)cnames.size()) cur = 0;
-                                    if (ImGui::Combo("##smp", &cur, cnames.data(), (int)cnames.size())) {
-                                        s.drum_sample[i].store(cur - 1);
-                                        need_remap = true;
-                                    }
-
-                                    ImGui::TableSetColumnIndex(2);
-                                    ImGui::SetNextItemWidth(-1);
-                                    int rate = s.drum_rate[i].load();
-                                    if (ImGui::SliderInt("##rt", &rate, 0, 15)) s.drum_rate[i].store(rate);
-                                    if (ImGui::IsItemDeactivatedAfterEdit()) need_remap = true;
-
-                                    ImGui::TableSetColumnIndex(3);
-                                    ImGui::SetNextItemWidth(-1);
-                                    int vol = s.drum_volume[i].load();
-                                    if (ImGui::SliderInt("##vl", &vol, 0, 15)) s.drum_volume[i].store(vol);
-                                    if (ImGui::IsItemDeactivatedAfterEdit()) need_remap = true;
-
-                                    ImGui::TableSetColumnIndex(4);
-                                    bool lp = s.drum_loop[i].load();
-                                    if (ImGui::Checkbox("##lp", &lp)) s.drum_loop[i].store(lp);
-
-                                    ImGui::TableSetColumnIndex(5);
-                                    if (ImGui::SmallButton("Test")) {
-                                        int smp = s.drum_sample[i].load();
-                                        if (smp >= 0 && smp < (int)dmc_samples.size()) {
-                                            play_dmc_preview(dmc_samples[smp],
-                                                             s.drum_rate[i].load(),
-                                                             s.drum_volume[i].load());
-                                        }
-                                    }
-                                    ImGui::PopID();
-                                }
-                                ImGui::EndTable();
-                            }
-                            ImGui::TextDisabled(TR("Rate: 0 = 428 Hz (high), 15 = 54 Hz (low)"));
-                        }
-                        ImGui::Separator();
-                    }
-
-                    // ====== Барабаны — Noise fallback ======
-                    if (ImGui::CollapsingHeader(TR("Drums - Noise fallback"),
-                                                ImGuiTreeNodeFlags_DefaultOpen))
-                    {
-                        int nm = s.drum_noise_mode.load();
-                        ImGui::SetNextItemWidth(140);
-                        if (ImGui::Combo("LFSR mode##drum", &nm, noises, 2))
-                            s.drum_noise_mode.store(nm);
-                        ImGui::SameLine();
-                        float mult = s.drum_noise_rate_mult.load();
-                        ImGui::SetNextItemWidth(150);
-                        if (ImGui::SliderFloat("Rate x##drum", &mult, 0.5f, 32.0f, "%.1f"))
-                            s.drum_noise_rate_mult.store(mult);
-                        ImGui::SameLine();
-                        float fh = s.drum_noise_fixed_hz.load();
-                        ImGui::SetNextItemWidth(150);
-                        if (ImGui::SliderFloat("Fixed Hz##drum", &fh, 0.0f, 8000.0f, "%.0f"))
-                            s.drum_noise_fixed_hz.store(fh);
-
-                        float A = s.drum_attack .load();
-                        float D = s.drum_decay  .load();
-                        float S = s.drum_sustain.load();
-                        float R = s.drum_release.load();
-                        ImGui::SetNextItemWidth(120);
-                        if (ImGui::SliderFloat("A##drum", &A, 0, 1, "%.2f")) s.drum_attack.store(A);
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(120);
-                        if (ImGui::SliderFloat("D##drum", &D, 0, 1, "%.2f")) s.drum_decay.store(D);
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(120);
-                        if (ImGui::SliderFloat("S##drum", &S, 0, 1, "%.2f")) s.drum_sustain.store(S);
-                        ImGui::SameLine();
-                        ImGui::SetNextItemWidth(120);
-                        if (ImGui::SliderFloat("R##drum", &R, 0, 2, "%.2f")) s.drum_release.store(R);
-                        ImGui::Separator();
-                    }
-
-                    // ====== Таблица 128 GM инструментов ======
-                    if (ImGui::BeginTable("inst_table", 8,
-                        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                        ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit,
-                        ImVec2(0, 480)))
-                    {
-                        ImGui::TableSetupScrollFreeze(0, 1);
-                        ImGui::TableSetupColumn("#",       ImGuiTableColumnFlags_WidthFixed, 30);
-                        ImGui::TableSetupColumn("Имя",     ImGuiTableColumnFlags_WidthStretch);
-                        ImGui::TableSetupColumn("Канал",   ImGuiTableColumnFlags_WidthFixed, 90);
-                        ImGui::TableSetupColumn("Duty",    ImGuiTableColumnFlags_WidthFixed, 90);
-                        ImGui::TableSetupColumn("A D S R", ImGuiTableColumnFlags_WidthFixed, 340);
-                        ImGui::TableSetupColumn("Sweep",   ImGuiTableColumnFlags_WidthFixed, 170);
-                        ImGui::TableSetupColumn("Noise",   ImGuiTableColumnFlags_WidthFixed, 200);
-                        ImGui::TableSetupColumn("",        ImGuiTableColumnFlags_WidthFixed, 50);
-                        ImGui::TableHeadersRow();
-
-                        ImGuiListClipper clip;
-                        clip.Begin(128);
-                        while (clip.Step()) {
-                            for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
-                                const char* name = GM_NAMES[i];
-                                if (filter[0]) {
-                                    std::string n = name, f = filter;
-                                    for (auto& c : n) c = (char)tolower((unsigned char)c);
-                                    for (auto& c : f) c = (char)tolower((unsigned char)c);
-                                    if (n.find(f) == std::string::npos) continue;
-                                }
-                                ImGui::TableNextRow();
-                                ImGui::PushID(i);
-
-                                ImGui::TableSetColumnIndex(0);
-                                ImGui::Text("%3d", i);
-
-                                ImGui::TableSetColumnIndex(1);
-                                ImGui::TextUnformatted(name);
-                                bool hover_name = ImGui::IsItemHovered();
-
-                                auto& I = player->settings().inst[i];
-                                int cur_ch = I.channel.load();
-
-                                ImGui::TableSetColumnIndex(2);
-                                ImGui::SetNextItemWidth(-1);
-                                int c = cur_ch;
-                                if (ImGui::Combo("##c", &c, chans, 3)) { I.channel.store(c); need_remap = true; }
-
-                                ImGui::TableSetColumnIndex(3);
-                                if (cur_ch == CH_PULSE) {
-                                    ImGui::SetNextItemWidth(-1);
-                                    int d = I.duty.load();
-                                    if (ImGui::Combo("##d", &d, duties, 4)) { I.duty.store(d); need_remap = true; }
-                                } else {
-                                    ImGui::TextDisabled("—");
-                                }
-
-                                ImGui::TableSetColumnIndex(4);
-                                if (draw_instrument_row(I)) need_remap = true;
-
-                                ImGui::TableSetColumnIndex(5);
-                                if (cur_ch == CH_PULSE) {
-                                    int sm = I.sweep_mode.load();
-                                    float sr = I.sweep_rate.load();
-                                    ImGui::SetNextItemWidth(80);
-                                    if (ImGui::Combo("##sm", &sm, sweeps, 4)) { I.sweep_mode.store(sm); need_remap = true; }
-                                    ImGui::SameLine();
-                                    ImGui::SetNextItemWidth(80);
-                                    if (ImGui::SliderFloat("##sr", &sr, 0.0f, 20.0f, "%.1fHz"))
-                                        I.sweep_rate.store(sr);
-                                    if (ImGui::IsItemDeactivatedAfterEdit()) need_remap = true;
-                                } else {
-                                    ImGui::TextDisabled("—");
-                                }
-
-                                ImGui::TableSetColumnIndex(6);
-                                if (cur_ch == CH_NOI) {
-                                    int nm = I.noise_mode.load();
-                                    ImGui::SetNextItemWidth(90);
-                                    if (ImGui::Combo("##nm", &nm, noises, 2)) { I.noise_mode.store(nm); need_remap = true; }
-                                    ImGui::SameLine();
-                                    float nrm = I.noise_rate_mult.load();
-                                    ImGui::SetNextItemWidth(80);
-                                    if (ImGui::SliderFloat("##nrm", &nrm, 0.5f, 32.0f, "x%.1f"))
-                                        I.noise_rate_mult.store(nrm);
-                                    if (ImGui::IsItemDeactivatedAfterEdit()) need_remap = true;
-                                } else {
-                                    ImGui::TextDisabled("—");
-                                }
-
-                                ImGui::TableSetColumnIndex(7);
-                                if (ImGui::SmallButton("Env")) g_env_edit_idx = i;
-                                ImGui::SameLine();
-                                if (ImGui::SmallButton("Def")) {
-                                    player->settings().reset_one(i);
-                                    need_remap = true;
-                                }
-                                ImGui::PopID();
-
-                                if (hover_name) {
-                                    ImGui::BeginTooltip();
-                                    ImGui::Text("%s", name);
-                                    ImGui::Separator();
-                                    float A = I.attack.load();
-                                    float D = I.decay.load();
-                                    float S = I.sustain.load();
-                                    float R = I.release.load();
-                                    draw_adsr_graph(A, D, S, R, ImVec2(260, 90));
-                                    const char* chn = (cur_ch == CH_PULSE) ? "Pulse" :
-                                                      (cur_ch == CH_TRI)   ? "Triangle" : "Noise";
-                                    ImGui::Text("Канал: %s", chn);
-                                    ImGui::Text("A=%.2f D=%.2f S=%.2f R=%.2f", A,D,S,R);
-                                    ImGui::EndTooltip();
-                                }
-                            }
-                        }
-                        ImGui::EndTable();
-                    }
-                    if (need_remap) player->remap();
-
-                    // ===== Envelope Editor (popup) =====
-                    if (g_env_edit_idx >= 0 && !ImGui::IsPopupOpen("Envelope Editor"))
-                        ImGui::OpenPopup("Envelope Editor");
-                    if (g_env_edit_idx >= 0 &&
-                        ImGui::BeginPopupModal("Envelope Editor", nullptr,
-                        ImGuiWindowFlags_AlwaysAutoResize))
-                    {
-                        auto& I = player->settings().inst[g_env_edit_idx];
-                        ImGui::Text("Инструмент %d: %s", g_env_edit_idx,
-                                    GM_NAMES[g_env_edit_idx]);
-                        ImGui::Separator();
-
-                        envelope_editor_ui("Volume", I.vol_env,   0, 15, 15,
-                                           IM_COL32(120,220,120,255), 1);
-                        envelope_editor_ui("Pitch",  I.pitch_env,-24, 24,  0,
-                                           IM_COL32(120,180,255,255), 2);
-                        envelope_editor_ui("Duty",   I.duty_env,   0,  3,  0,
-                                           IM_COL32(255,180,120,255), 3);
-                        envelope_editor_ui("Arp",    I.arp_env,  -12, 12,  0,
-                                           IM_COL32(255,140,200,255), 4);
-
-                        ImGui::Separator();
-                        if (ImGui::Button(TR("Close"), ImVec2(120, 30))) {
-                            ImGui::CloseCurrentPopup();
-                            g_env_edit_idx = -1;
-                        }
-                        ImGui::EndPopup();
-                    }
+                ImGui::SetNextWindowSize(ImVec2(1180, 760), ImGuiCond_FirstUseEver);
+                if (ImGui::Begin("Редактор инструментов", &show_editor)) {
+                    bool r = draw_instrument_editor(player->settings(), player, g_inst_edit_idx, &dmc_samples);
+                    if (r) player->remap();
                 }
                 ImGui::End();
             }

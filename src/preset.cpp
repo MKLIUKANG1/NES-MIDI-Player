@@ -40,7 +40,7 @@ static void load_env(std::ifstream& f, EnvelopeCurve& e, int ver){
 bool save_preset(const std::wstring& wpath, const ChipSettings& s){
     std::ofstream f(wide_to_utf8(wpath));
     if (!f) return false;
-    f << "NESPRESET 5\n";
+    f << "NESPRESET 6\n";
     f << "p1v " << s.pulse1_vol.load() << "\n";
     f << "p2v " << s.pulse2_vol.load() << "\n";
     f << "tv "  << s.triangle_vol.load() << "\n";
@@ -66,6 +66,22 @@ bool save_preset(const std::wstring& wpath, const ChipSettings& s){
           << " " << s.drum_volume[i].load()
           << " " << (s.drum_loop[i].load()?1:0) << "\n";
     }
+
+    for (int i=0;i<DRUM_COUNT;++i){
+        f << "dsn " << i
+          << " " << s.drum_noise_mode_slot[i].load()
+          << " " << s.drum_noise_rate_index_slot[i].load()
+          << " " << s.drum_noise_attack_slot[i].load()
+          << " " << s.drum_noise_decay_slot[i].load()
+          << " " << s.drum_noise_sustain_slot[i].load()
+          << " " << s.drum_noise_release_slot[i].load()
+          << " " << s.drum_noise_pitch_offset_slot[i].load() << "\n";
+    }
+
+    for (int i=0;i<DRUM_COUNT;++i){
+        save_env(f, "dve", i, s.drum_vol_env[i]);
+        save_env(f, "dre", i, s.drum_rate_env[i]);
+    }
     for (int i=0;i<128;++i){
         const auto& I = s.inst[i];
         f << "i " << i
@@ -79,11 +95,13 @@ bool save_preset(const std::wstring& wpath, const ChipSettings& s){
           << " " << I.sweep_rate.load()
           << " " << I.noise_mode.load()
           << " " << I.noise_rate_mult.load()
-          << " " << I.noise_fixed_hz.load() << "\n";
+          << " " << I.noise_fixed_hz.load()
+          << " " << I.noise_rate_index.load() << "\n";
         save_env(f, "ev", i, I.vol_env);
         save_env(f, "ep", i, I.pitch_env);
         save_env(f, "ed", i, I.duty_env);
         save_env(f, "ea", i, I.arp_env);
+        save_env(f, "er", i, I.rate_env);
     }
     return f.good();
 }
@@ -93,7 +111,7 @@ bool load_preset(const std::wstring& wpath, ChipSettings& s){
     if (!f) return false;
     std::string tag; int ver=0;
     f >> tag >> ver;
-    if (tag!="NESPRESET" || ver<1 || ver>5) return false;
+    if (tag!="NESPRESET" || ver<1 || ver>6) return false;
     std::string key;
     while (f >> key){
         if      (key=="p1v"){ int x; f>>x; s.pulse1_vol.store(x); }
@@ -124,12 +142,28 @@ bool load_preset(const std::wstring& wpath, ChipSettings& s){
                 s.drum_loop[idx].store(lp!=0);
             }
         }
+        else if (key=="dsn"){
+            int idx, mode, ri;
+            float at, de, su, re, po;
+            f>>idx>>mode>>ri>>at>>de>>su>>re>>po;
+            if (idx>=0&&idx<DRUM_COUNT){
+                s.drum_noise_mode_slot[idx].store(mode);
+                s.drum_noise_rate_index_slot[idx].store(ri);
+                s.drum_noise_attack_slot[idx].store(at);
+                s.drum_noise_decay_slot[idx].store(de);
+                s.drum_noise_sustain_slot[idx].store(su);
+                s.drum_noise_release_slot[idx].store(re);
+                s.drum_noise_pitch_offset_slot[idx].store(po);
+            }
+        }
         else if (key=="i"){
             int idx,ch,duty,sw=0,nm=0;
             float a,d,su,r,swr=0.0f,nrm=8.0f,nfh=0.0f;
             f>>idx>>ch>>duty>>a>>d>>su>>r;
             if (ver>=2) f>>sw>>swr;
             if (ver>=3) f>>nm>>nrm>>nfh;
+            int nri = -1;
+            if (ver>=6) f >> nri;
             if (ver<3) ch = remap_old_channel(ch);
             if (idx>=0&&idx<128){
                 auto& I = s.inst[idx];
@@ -144,9 +178,25 @@ bool load_preset(const std::wstring& wpath, ChipSettings& s){
                 I.noise_mode.store(nm);
                 I.noise_rate_mult.store(nrm);
                 I.noise_fixed_hz.store(nfh);
+                if (ver >= 6) {
+                    I.noise_rate_index.store(nri);
+                } else {
+                    // Миграция: старый mult × C4
+                    double hz = nrm * 261.63;
+                    I.noise_rate_index.store(noise_rate_hz_to_index(hz));
+                }
             }
         }
-        else if (key=="ev" || key=="ep" || key=="ed" || key=="ea"){
+        else if (key=="dve" || key=="dre"){
+            int idx; f >> idx;
+            if (idx>=0 && idx<DRUM_COUNT){
+                if (key=="dve") load_env(f, s.drum_vol_env[idx],  ver);
+                else            load_env(f, s.drum_rate_env[idx], ver);
+            } else {
+                std::string tmp; std::getline(f, tmp);
+            }
+        }
+        else if (key=="ev" || key=="ep" || key=="ed" || key=="ea" || key=="er"){
             int idx; f >> idx;
             if (idx>=0 && idx<128){
                 auto& I = s.inst[idx];
@@ -154,10 +204,27 @@ bool load_preset(const std::wstring& wpath, ChipSettings& s){
                 else if (key=="ep") load_env(f, I.pitch_env, ver);
                 else if (key=="ed") load_env(f, I.duty_env,  ver);
                 else if (key=="ea") load_env(f, I.arp_env,   ver);
+                else if (key=="er") load_env(f, I.rate_env,  ver);
             } else {
-                // Пропускаем строку
                 std::string tmp; std::getline(f, tmp);
             }
+        }
+    }
+    // Миграция v<8: копируем глобальные drum-настройки во все слоты
+    if (ver < 8) {
+        int mode = s.drum_noise_mode.load();
+        float at = s.drum_attack.load();
+        float de = s.drum_decay.load();
+        float su = s.drum_sustain.load();
+        float re = s.drum_release.load();
+        for (int i = 0; i < DRUM_COUNT; ++i) {
+            s.drum_noise_mode_slot[i].store(mode);
+            s.drum_noise_rate_index_slot[i].store(6);
+            s.drum_noise_attack_slot[i].store(at);
+            s.drum_noise_decay_slot[i].store(de);
+            s.drum_noise_sustain_slot[i].store(su);
+            s.drum_noise_release_slot[i].store(re);
+            s.drum_noise_pitch_offset_slot[i].store(0.0f);
         }
     }
     return true;

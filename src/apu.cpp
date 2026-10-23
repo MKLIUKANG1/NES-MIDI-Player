@@ -75,6 +75,44 @@ static const FamilyDef FAM[16]={
 };
 }
 
+// ==== Палитра цветов для 128 GM инструментов ====
+uint32_t instrument_default_color(int idx) {
+    static const uint32_t CAT_COLORS[16] = {
+        0xFF4A90E2, // 0 Piano       — синий
+        0xFF50E3C2, // 1 ChromPerc   — бирюзовый
+        0xFF7ED321, // 2 Organ       — зелёный
+        0xFFF5A623, // 3 Guitar      — оранжевый
+        0xFFD0021B, // 4 Bass        — красный
+        0xFF9B9B9B, // 5 Strings     — серый
+        0xFFF8E71C, // 6 Ensemble    — жёлтый
+        0xFF9013FE, // 7 Brass       — фиолетовый
+        0xFFB8E986, // 8 Reed        — светл. зелёный
+        0xFF2ECC71, // 9 Pipe        — изумруд
+        0xFFEC6C9A, // 10 Lead       — розовый
+        0xFFB8A98C, // 11 Pad        — бежевый
+        0xFF4A4A4A, // 12 FX         — тёмно-серый
+        0xFFD4A017, // 13 Ethnic     — золото
+        0xFFE02A2A, // 14 Perc       — ярко-красный
+        0xFF6B6B6B, // 15 SFX        — серый
+    };
+    if (idx < 0) idx = 0;
+    if (idx > 127) idx = 127;
+    int cat = idx / 8;
+    int sub = idx % 8;
+    uint32_t base = CAT_COLORS[cat];
+    // Немного варьируем яркость в пределах категории
+    int r = (base >>  0) & 0xFF;
+    int g = (base >>  8) & 0xFF;
+    int b = (base >> 16) & 0xFF;
+    int a = (base >> 24) & 0xFF;
+    float t = (sub - 3.5f) / 3.5f;   // -1..+1
+    auto clamp255 = [](int x){ return x<0?0:(x>255?255:x); };
+    r = clamp255(r + (int)(t * 30));
+    g = clamp255(g + (int)(t * 30));
+    b = clamp255(b + (int)(t * 30));
+    return ((uint32_t)a<<24) | ((uint32_t)b<<16) | ((uint32_t)g<<8) | (uint32_t)r;
+}
+
 ChipSettings::ChipSettings(){ reset_all(); }
 void ChipSettings::reset_all(){
     for (int i=0;i<128;++i) reset_one(i);
@@ -92,6 +130,7 @@ void ChipSettings::reset_one(int i){
     if (i<0||i>=128) return;
     const auto& f = FAM[i/8];
     auto& I = inst[i];
+    I.color.store(0);   // auto
     I.channel.store(f.ch);
     I.duty.store(f.duty);
     I.attack.store(f.a);
@@ -103,6 +142,14 @@ void ChipSettings::reset_one(int i){
     I.noise_mode.store(f.ch==CH_NOI?1:0);
     I.noise_rate_mult.store(8.0f);
     I.noise_fixed_hz.store(0.0f);
+    // Начальный rate index для noise-инструментов — 6 (14 кГц)
+    I.noise_rate_index.store(6);
+    I.rate_env.enabled.store(false);
+    I.rate_env.length.store(16);
+    I.rate_env.speed.store(1);
+    I.rate_env.loop_start.store(-1);
+    I.rate_env.loop_end.store(-1);
+    I.rate_env.fill(0);
     I.vol_env.enabled.store(false);   I.vol_env.length.store(16); I.vol_env.speed.store(1);
     I.vol_env.loop_start.store(-1);   I.vol_env.loop_end.store(-1);
     I.vol_env.fill(15);
@@ -287,47 +334,79 @@ void ApuPlayer::map_notes(){
 
     for (const auto& n : v){
         // ===== DRUMS =====
-        if (n.channel==drum_ch){
+        if (n.channel == drum_ch) {
             int slot = midi_pitch_to_drum_slot(n.pitch);
-            if (use_dpcm && slot>=0){
+
+            if (use_dpcm && slot >= 0) {
                 int sidx = settings_.drum_sample[slot].load();
-                if (sidx>=0){
+                if (sidx >= 0) {
                     DmcNote dn;
-                    dn.start=n.start_sec;
-                    dn.sample_idx=sidx;
-                    dn.rate_index=settings_.drum_rate[slot].load();
-                    dn.volume=settings_.drum_volume[slot].load();
-                    dn.loop=settings_.drum_loop[slot].load();
+                    dn.start = n.start_sec;
+                    dn.sample_idx = sidx;
+                    dn.rate_index = settings_.drum_rate[slot].load();
+                    dn.volume = settings_.drum_volume[slot].load();
+                    dn.loop = settings_.drum_loop[slot].load();
                     dmc_.push_back(dn);
                     continue;
                 }
             }
+
             ApuNote an;
-            an.start=n.start_sec;
-            an.end=n.start_sec+n.dur_sec;
-            an.dur_sec=n.dur_sec;
-            an.freq=midi_to_freq(n.pitch);
-            an.pitch=n.pitch;
-            int vol=n.velocity/8;
-            an.volume=std::max(1,std::min(15,vol));
-            an.duty=2; an.sweep_mode=0; an.sweep_rate=0.0f;
-            an.noise_mode=settings_.drum_noise_mode.load();
-            float mult=settings_.drum_noise_rate_mult.load();
-            float fixed=settings_.drum_noise_fixed_hz.load();
-            an.noise_rate = (fixed>0.0f)?fixed:an.freq*mult;
-            an.env.attack=settings_.drum_attack.load();
-            an.env.decay=settings_.drum_decay.load();
-            an.env.sustain=settings_.drum_sustain.load();
-            an.env.release=settings_.drum_release.load();
-            an.instrument_idx=-1;
-            put(noi_,an);
+            an.start   = n.start_sec;
+            an.end     = n.start_sec + n.dur_sec;
+            an.dur_sec = n.dur_sec;
+            an.pitch   = n.pitch;
+            int vol = n.velocity / 8;
+            an.volume  = std::max(1, std::min(15, vol));
+            an.duty    = 2;
+            an.sweep_mode = 0;
+            an.sweep_rate = 0.0f;
+            an.instrument_idx = -1;
+            an.drum_slot = slot;   // ВАЖНО: явно устанавливаем
+
+            if (slot >= 0) {
+                // Per-slot настройки
+                an.freq       = midi_to_freq(n.pitch);
+                an.noise_mode = settings_.drum_noise_mode_slot[slot].load();
+                int ri        = settings_.drum_noise_rate_index_slot[slot].load();
+                if (ri < 0) ri = 0;
+                if (ri > 15) ri = 15;
+                an.noise_rate_index = ri;
+                an.noise_rate       = 0.0f;
+                an.env.attack  = settings_.drum_noise_attack_slot[slot].load();
+                an.env.decay   = settings_.drum_noise_decay_slot[slot].load();
+                an.env.sustain = settings_.drum_noise_sustain_slot[slot].load();
+                an.env.release = settings_.drum_noise_release_slot[slot].load();
+            } else {
+                // Legacy (питч не маппится)
+                an.freq       = midi_to_freq(n.pitch);
+                an.noise_mode = settings_.drum_noise_mode.load();
+                float mult    = settings_.drum_noise_rate_mult.load();
+                float fixed   = settings_.drum_noise_fixed_hz.load();
+                an.noise_rate = (fixed > 0.0f) ? fixed : an.freq * mult;
+                an.noise_rate_index = -1;
+                an.env.attack  = settings_.drum_attack.load();
+                an.env.decay   = settings_.drum_decay.load();
+                an.env.sustain = settings_.drum_sustain.load();
+                an.env.release = settings_.drum_release.load();
+            }
+
+            // Fallback: если D=0 и S=0 -> тишина, ставим короткий удар
+            if (an.env.decay < 0.01f && an.env.sustain < 0.01f) {
+                an.env.decay = 0.08f;
+            }
+            if (an.env.release < 0.01f) an.env.release = 0.05f;
+
+            put(noi_, an);
             continue;
         }
+
 
         // ===== MELODIC =====
         int target_ch=CH_PULSE, duty=2, sweep_mode=0;
         float sweep_rate=0.0f, noise_mult=8.0f, noise_fixed=0.0f;
         int noise_mode=0;
+        int noise_rate_idx_val = -1;   // -1 = legacy (mult*freq)
         int instrument_idx=-1;
         EnvParams env;
 
@@ -342,6 +421,7 @@ void ApuPlayer::map_notes(){
             noise_mode=I.noise_mode.load();
             noise_mult=I.noise_rate_mult.load();
             noise_fixed=I.noise_fixed_hz.load();
+            noise_rate_idx_val = I.noise_rate_index.load();
             if (use_env){
                 env.attack=I.attack.load();
                 env.decay=I.decay.load();
@@ -368,6 +448,7 @@ void ApuPlayer::map_notes(){
         an.sweep_rate=sweep_rate;
         an.noise_mode=noise_mode;
         an.noise_rate=(noise_fixed>0.0f)?noise_fixed:an.freq*noise_mult;
+        an.noise_rate_index = noise_rate_idx_val;
         an.instrument_idx=instrument_idx;
         an.env=env;
 
@@ -399,21 +480,24 @@ static inline void apply_envelopes(int inst_idx, int base_pitch,
         if (v<0) v=0; if (v>15) v=15;
         vol = vol * v / 15;
     }
-    if (I.pitch_env.enabled.load()){
-        int st=env_step(I.pitch_env,tl);
-        int p=I.pitch_env.values[st].load();
-        if (p<-36) p=-36; if (p>36) p=36;
-        freq = midi_to_freq(base_pitch + p);
-    }
-    if (I.arp_env.enabled.load()){
-        int st=env_step(I.arp_env,tl);
-        int a=I.arp_env.values[st].load();
-        if (a<-24) a=-24; if (a>24) a=24;
-        freq = midi_to_freq(base_pitch + a);
-    }
-    if (I.duty_env.enabled.load()){
-        int st=env_step(I.duty_env,tl);
-        duty = I.duty_env.values[st].load() & 3;
+    bool is_noise = (I.channel.load() == CH_NOI);
+    if (!is_noise) {
+        if (I.pitch_env.enabled.load()){
+            int st=env_step(I.pitch_env,tl);
+            int p=I.pitch_env.values[st].load();
+            if (p<-36) p=-36; if (p>36) p=36;
+            freq = midi_to_freq(base_pitch + p);
+        }
+        if (I.arp_env.enabled.load()){
+            int st=env_step(I.arp_env,tl);
+            int a=I.arp_env.values[st].load();
+            if (a<-24) a=-24; if (a>24) a=24;
+            freq = midi_to_freq(base_pitch + a);
+        }
+        if (I.duty_env.enabled.load()){
+            int st=env_step(I.duty_env,tl);
+            duty = I.duty_env.values[st].load() & 3;
+        }
     }
 }
 
@@ -461,16 +545,36 @@ void ApuPlayer::advance_to(double t){
     while (in_<noi_.size() && noi_[in_].end + noi_[in_].env.release <= t) ++in_;
     if (in_<noi_.size() && noi_[in_].start<=t){
         const auto& n=noi_[in_];
+        // DEBUG: только для drum, только первый сэмпл
+        if (n.drum_slot >= 0 && t - n.start < 0.001) {
+        }
         double tl=t-n.start;
         double a=env_value(tl,n.dur_sec,n.env);
-        double freq=n.freq;
         int vol=(int)std::lround(n.volume*a);
         int dummy_duty=2;
-        if (settings_.use_envelopes.load()) apply_envelopes(n.instrument_idx,n.pitch,settings_,tl,freq,vol,dummy_duty);
-        // Для noise pitch влияет на rate через n.noise_rate, но envelope pitch — упростим:
-        double rate = n.noise_rate;
-        if (freq != n.freq && n.freq>0) rate = n.noise_rate * (freq/n.freq);
-        apu_.set_noise(rate, std::max(0,std::min(15,vol)), n.noise_mode);
+        double dummy_freq = n.freq;
+        if (settings_.use_envelopes.load())
+            apply_envelopes(n.instrument_idx,n.pitch,settings_,tl,dummy_freq,vol,dummy_duty);
+
+        double rate_hz;
+        if (n.noise_rate_index >= 0) {
+            // Новый режим: NES rate table + rate_env
+            int idx = n.noise_rate_index;
+            if (n.instrument_idx >= 0) {
+                const auto& I = settings_.inst[n.instrument_idx];
+                if (I.rate_env.enabled.load()) {
+                    int step = env_step(I.rate_env, tl);
+                    idx += I.rate_env.values[step].load();
+                    if (idx < 0) idx = 0;
+                    if (idx > 15) idx = 15;
+                }
+            }
+            rate_hz = NES_NOISE_RATE[idx];
+        } else {
+            // Legacy (drums): n.noise_rate в Гц
+            rate_hz = n.noise_rate;
+        }
+        apu_.set_noise(rate_hz, std::max(0,std::min(15,vol)), n.noise_mode);
     } else apu_.set_noise(0,0,0);
 
     // DMC

@@ -39,3 +39,11 @@ $RECYCLE.BIN/
 
 # ==== Логи ====
 *.log
+*.zip
+dist/
+Midi/
+*.mid
+*.midi
+Midi/
+*.mid
+*.midi

@@ -8,6 +8,28 @@
 
 enum ApuChannel { CH_PULSE = 0, CH_TRI = 1, CH_NOI = 2 };
 
+// ==== NES APU noise rate table (NTSC) ====
+// Index 0 = 447 kHz (highest), 15 = 440 Hz (lowest)
+inline constexpr double NES_NOISE_RATE[16] = {
+    447443.0, 223721.0, 111860.0, 55930.0,
+    27965.0,  18643.0,  13983.0, 11186.0,
+    8858.0,   7048.0,   4711.0,  3524.0,
+    2349.0,   1762.0,   880.0,   440.0
+};
+
+// Подобрать ближайший index к заданной частоте (для миграции пресетов)
+inline int noise_rate_hz_to_index(double hz) {
+    int best = 6;
+    double best_diff = 1e18;
+    for (int i = 0; i < 16; ++i) {
+        double diff = NES_NOISE_RATE[i] > hz
+                    ? NES_NOISE_RATE[i] - hz
+                    : hz - NES_NOISE_RATE[i];
+        if (diff < best_diff) { best_diff = diff; best = i; }
+    }
+    return best;
+}
+
 enum DrumSlotId {
     DRUM_KICK=0, DRUM_SNARE, DRUM_SNARE2, DRUM_CLAP,
     DRUM_HIHAT, DRUM_HIHAT2, DRUM_TOM, DRUM_CYMBAL,
@@ -39,7 +61,7 @@ struct EnvelopeCurve {
     static constexpr int MAX_STEPS = 64;
     std::atomic<bool> enabled{false};
     std::atomic<int>  length{16};
-    std::atomic<int>  speed{1};      // ticks @60Hz per step
+    std::atomic<int>  speed{1};
     std::atomic<int>  loop_start{-1};
     std::atomic<int>  loop_end{-1};
     std::atomic<int>  values[MAX_STEPS];
@@ -59,6 +81,7 @@ struct EnvelopeCurve {
 };
 
 struct Instrument {
+    std::atomic<uint32_t> color{0};   // RGBA, 0 = auto (по категории)
     std::atomic<int>   channel{CH_PULSE};
     std::atomic<int>   duty   {2};
     std::atomic<float> attack {0.005f};
@@ -71,6 +94,10 @@ struct Instrument {
     std::atomic<float> noise_rate_mult{8.0f};
     std::atomic<float> noise_fixed_hz{0.0f};
 
+    // ==== Новое: нормальный редактор NOISE ====
+    std::atomic<int>   noise_rate_index{6};   // 0-15
+    EnvelopeCurve      rate_env;               // offset -15..+15
+
     EnvelopeCurve vol_env, pitch_env, duty_env, arp_env;
 
     Instrument() = default;
@@ -78,6 +105,7 @@ struct Instrument {
     Instrument& operator=(const Instrument& o){ copy_from(o); return *this; }
 
     void copy_from(const Instrument& o){
+        color.store(o.color.load());
         channel.store(o.channel.load());
         duty.store(o.duty.load());
         attack.store(o.attack.load());
@@ -89,10 +117,12 @@ struct Instrument {
         noise_mode.store(o.noise_mode.load());
         noise_rate_mult.store(o.noise_rate_mult.load());
         noise_fixed_hz.store(o.noise_fixed_hz.load());
+        noise_rate_index.store(o.noise_rate_index.load());
         vol_env.copy_from(o.vol_env);
         pitch_env.copy_from(o.pitch_env);
         duty_env.copy_from(o.duty_env);
         arp_env.copy_from(o.arp_env);
+        rate_env.copy_from(o.rate_env);
     }
 };
 
@@ -116,6 +146,19 @@ struct ChipSettings {
     std::atomic<float> drum_decay{0.150f};
     std::atomic<float> drum_sustain{0.00f};
     std::atomic<float> drum_release{0.100f};
+
+    // ==== v8: per-slot Noise drum settings ====
+    std::atomic<int>   drum_noise_mode_slot[DRUM_COUNT];
+    std::atomic<int>   drum_noise_rate_index_slot[DRUM_COUNT];
+    std::atomic<float> drum_noise_attack_slot[DRUM_COUNT];
+    std::atomic<float> drum_noise_decay_slot[DRUM_COUNT];
+    std::atomic<float> drum_noise_sustain_slot[DRUM_COUNT];
+    std::atomic<float> drum_noise_release_slot[DRUM_COUNT];
+    std::atomic<float> drum_noise_pitch_offset_slot[DRUM_COUNT];
+
+    // ==== v9: графические огибающие для drum-слотов ====
+    EnvelopeCurve drum_vol_env[DRUM_COUNT];    // множитель громкости 0-15
+    EnvelopeCurve drum_rate_env[DRUM_COUNT];   // offset к base rate (-15..+15)
 
     ChipSettings();
     void reset_all();
@@ -180,7 +223,9 @@ private:
         float sweep_rate;
         int noise_mode;
         float noise_rate;
-        int instrument_idx;     // -1 = не GM
+        int noise_rate_index;      // -1 = legacy drums, 0-15 = NES table
+        int instrument_idx;
+        int drum_slot;             // -1 = не drum, 0..7 = slot index
         EnvParams env;
     };
     struct DmcNote { double start; int sample_idx,rate_index,volume; bool loop; };
@@ -197,6 +242,9 @@ private:
     ChipSettings settings_;
     const std::vector<DmcSample>* dmc_samples_=nullptr;
 };
+
+// Возвращает цвет по умолчанию для инструмента (по GM-категории + оттенок)
+uint32_t instrument_default_color(int idx);
 
 inline int derive_channel(const MidiNote& n, const ChipSettings& s){
     if (n.channel==s.drum_channel) return CH_NOI;
