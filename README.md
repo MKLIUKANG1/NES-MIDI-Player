@@ -1,6 +1,6 @@
 # 🎮 NES MIDI Player
 
-[![Version](https://img.shields.io/badge/version-1.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)]()
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)]()
 [![Language](https://img.shields.io/badge/language-C%2B%2B17-orange.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -9,7 +9,7 @@
 **MIDI-плеер, который синтезирует музыку через программную эмуляцию звукового чипа NES (Ricoh 2A03 APU).**
 
 **Автор:** MKLIUKANG1  
-**Версия:** 1.0  
+**Версия:** 1.0.1  
 **Платформа:** Windows 10/11 (x64)
 
 ---
@@ -35,13 +35,20 @@
 - **Графический envelope-редактор**: Volume, Pitch, Duty, Arpeggio (рисование мышью)
 - **Фильтр по имени** и сброс к дефолту отдельного инструмента
 
+### 🥁 Noise Drum Slots *(новое в v1.0.1)*
+
+- **8 слотов**: Kick, Snare, Snare 2, Clap, HiHat, HiHat Open, Tom, Cymbal
+- **Независимые настройки для каждого слота**: LFSR mode (long/short), base rate (0–15), pitch offset, ADSR, envelope-кривые
+- Per-slot настройки **применяются из MIDI** в реальном времени
+- Кнопка **🔊 Test** — мгновенное прослушивание через отдельное SDL-устройство
+- Fallback ADSR: при `D = 0` и `S = 0` автоматически ставится короткий удар
+
 ### 🥁 DPCM Drum Slots
 
 - 8 слотов: **Kick, Snare, Snare 2, Clap, HiHat, HiHat Open, Tom, Cymbal**
 - Автоматический маппинг по MIDI-питчам (35/36 → Kick, 38 → Snare, …)
 - Загрузка `.dmc` / `.bin` файлов из папки `DPCM Samples/`
 - Для каждого слота: sample, rate (0–15), volume, loop
-- Кнопка **Test** — проигрывание через отдельное SDL-устройство
 - Глобальный переключатель **DPCM / Noise** в транспорте
 
 ### 📊 Piano Roll
@@ -62,9 +69,9 @@
 
 ### 💾 Пресеты и настройки
 
-- Формат `.nespreset` версии 1–5 (**обратная совместимость**)
-- Сохраняет всё: 128 инструментов, drum-слоты, envelope-кривые
-- Автозагрузка `Presets/default.nespreset` при старте
+- Формат `.nespreset` (**обратная совместимость** версий 1–9)
+- Сохраняет всё: 128 инструментов, drum-слоты (DPCM + Noise), envelope-кривые, цвета инструментов
+- Автозагрузка `Presets/Default.nespreset` при старте
 - Пункт меню **«Сохранить как пресет по умолчанию»**
 
 ### 🌊 Экспорт в WAV
@@ -83,7 +90,7 @@
 
 - Нативные диалоги Windows (`GetOpenFileNameW` / `GetSaveFileNameW`)
 - Полная поддержка кириллицы в путях файлов
-- Иконка приложения (генерируется Python-скриптом)
+- Иконка приложения
 - Горячие клавиши: **Space** — play/pause, **Ctrl+O** — open, **Esc** — выход
 
 ---
@@ -128,14 +135,8 @@ cp /mingw64/bin/SDL2.dll .
 Запуск
 bash
 ./nes_midi_player_v1.0.exe your_file.mid
-🎹 Использование
-Горячие клавиши
-Клавиша	Действие
-Space	Play / Pause
-Ctrl+O	Открыть MIDI
-Esc	Выход / закрыть popup
 Быстрый старт
-Запустите nes_midi_player_v1.0.exe
+Запустите nes_midi_player_v1.0.1.exe
 
 Файл → Открыть MIDI… (Ctrl+O) — выберите .mid
 
@@ -145,10 +146,29 @@ Esc	Выход / закрыть popup
 
 Файл → Экспорт в WAV… — сохраните результат
 
+Настройка Noise-барабанов
+В редакторе откройте секцию Drum Slots → Noise (per slot)
+
+Выберите слот кнопкой: Kick / Snare / HiHat / …
+
+Настройте:
+
+LFSR mode: long (тоны) или short (перкуссия)
+
+Base Rate: 0 (447 кГц) … 15 (440 Гц)
+
+Pitch offset: -24 … +24 полутона
+
+ADSR и envelope-кривые (Volume + Rate)
+
+Нажмите 🔊 Test для проверки
+
+В транспорте переключите на «Барабаны: Noise»
+
 Настройка DPCM-барабанов
 Положите .dmc файлы в папку DPCM Samples/
 
-В редакторе откройте секцию DMC — Drum Slots
+В редакторе откройте секцию Drum Slots → DPCM Samples
 
 Назначьте сэмплы на слоты Kick / Snare / HiHat / …
 
@@ -157,7 +177,7 @@ Esc	Выход / закрыть popup
 Графические envelope-кривые
 В редакторе инструментов нажмите Env у нужного инструмента
 
-Откроется окно с 4 кривыми:
+Откроется окно с кривыми:
 
 Volume (0–15) — множитель громкости
 
@@ -167,13 +187,15 @@ Duty (0–3) — тип импульса (для Pulse)
 
 Arp (-12..+12) — арпеджио
 
+Rate (-15..+15) — для Noise (заменяет Pitch)
+
 Рисуйте ЛКМ, стирайте ПКМ, настройте длину и скорость
 
 Изменения применяются мгновенно
 
 📁 Структура проекта
 text
-nes-midi-player/
+NES-MIDI-Player/
 ├── src/
 │   ├── main.cpp              # GUI на Dear ImGui
 │   ├── apu.cpp               # Ядро эмуляции NES APU
@@ -183,6 +205,7 @@ nes-midi-player/
 │   ├── preset.cpp            # Сохранение/загрузка пресетов
 │   ├── wav_writer.cpp        # Экспорт в WAV
 │   ├── builtin_presets.cpp   # 5 встроенных пресетов
+│   ├── instrument_editor.cpp # FamiStudio-style редактор
 │   └── gui/                  # Dear ImGui + бэкенды
 ├── include/
 │   ├── apu.h                 # NesApu, ApuPlayer, ChipSettings
@@ -195,12 +218,12 @@ nes-midi-player/
 │   ├── version.h             # Имя, версия, автор
 │   ├── wav_writer.h
 │   ├── builtin_presets.h
+│   ├── instrument_editor.h
 │   └── env_editor.h          # GUI envelope-редактора
 ├── DPCM Samples/             # Пользовательские .dmc файлы
 │   └── README.txt
 ├── Presets/
-│   ├── default.nespreset
-│   └── language.txt
+│   └── Default.nespreset
 ├── third_party/imgui/        # Dear ImGui v1.91.5
 ├── icon.ico                  # Иконка приложения
 ├── app.rc                    # Ресурсный файл
@@ -230,7 +253,7 @@ Triangle	16-шаговое bipolar преобразование
 Noise	15-битный LFSR с tap bits 0,1 (long) или 0,6 (short)
 DPCM	Побайтное чтение .dmc, MSB-first, ±2 к level (0..127)
 Раскладка MIDI → APU
-Drums (MIDI ch 9) → Noise или DPCM (по питчу)
+Drums (MIDI ch 9) → Noise (per-slot) или DPCM (по питчу)
 
 Bass (низкие ноты) → Triangle
 
@@ -259,6 +282,23 @@ Preview DMC не слышен (конфликт с callback)	Отдельное 
 DMC играл как щелчки и низкий гул	Исправлена таблица частот: 4181…33143 Hz
 Кириллица в fopen	_wfopen + WideCharToMultiByte
 Envelope popup не закрывался	IsPopupOpen + CloseCurrentPopup перед сбросом индекса
+Per-slot noise drums не применялись из MIDI (v1.0.1)	Явная маршрутизация через ApuNote.drum_slot
+Тишина при D=0 и S=0 (v1.0.1)	Fallback: D = 0.08f
+🗓️ Changelog
+v1.0.1 (2026-10-23)
+🐛 Per-slot Noise drums — настройки Kick/Snare/HiHat/… применяются из MIDI
+
+🐛 Fallback ADSR при D=0 и S=0 — короткий удар (0.08 s)
+
+✨ ApuNote.drum_slot — явная маршрутизация per-slot
+
+🧹 Убраны debug-логи [DRUM-IN] / [NOISE-DRUM]
+
+📜 Добавлен LICENSE (MIT)
+
+v1.0.0 (2026-10-03)
+🎉 Первый публичный релиз
+
 🤝 Вклад
 Pull requests приветствуются!
 
@@ -282,4 +322,5 @@ Nesdev Wiki — документация по APU (LFSR, DPCM, NTSC rate table)
 
 Сообщество чиптюн — за вдохновение и поддержку сцены 🎶
 
+⭐ Если проект вам понравился — поставьте звезду на GitHub!
 ⭐ Если проект вам понравился — поставьте звезду на GitHub!
